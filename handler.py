@@ -255,17 +255,8 @@ def _handle_voice_clone(job_input):
     }
 
 
-# ─── Main ─────────────────────────────────────────────────────────────────────
+# ─── Startup (module level — required by RunPod Hub detection) ────────────────
 
-if __name__ == "__main__":
-    is_runpod = os.environ.get("RUNPOD_POD_ID") or os.environ.get("RUNPOD_ENDPOINT_ID")
-
-    if is_runpod:
-        # RunPod Serverless: start services, then enter job loop
-        start_services()
-        wait_for_services()
-        runpod.serverless.start({"handler": handler})
-    else:
-        # Standalone / Koyeb: just run supervisord directly
-        logger.info("Non-RunPod environment — starting supervisord...")
-        os.execvp("supervisord", ["supervisord", "-c", "/app/supervisord.conf"])
+start_services()
+wait_for_services()
+runpod.serverless.start({"handler": handler})
