@@ -117,6 +117,5 @@ EXPOSE 8998
 HEALTHCHECK --interval=30s --timeout=10s --start-period=600s --retries=3 \
     CMD curl -f http://localhost:8998/health || exit 1
 
-# start.sh auto-detects RunPod vs standalone and starts the right entrypoint
 ENTRYPOINT []
-CMD ["/app/start.sh"]
+CMD ["python3", "-u", "/app/handler.py"]
