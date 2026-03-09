@@ -1,0 +1,61 @@
+{
+  "tests": [
+    {
+      "name": "health_check",
+      "input": {
+        "endpoint": "health"
+      },
+      "timeout": 300000
+    },
+    {
+      "name": "tts_voice_clone",
+      "input": {
+        "endpoint": "voice-clone",
+        "text": "Hello, this is a voice cloning test.",
+        "language": "English",
+        "ref_text": "Hello, welcome! How can I help you today?",
+        "stream": false
+      },
+      "timeout": 60000
+    },
+    {
+      "name": "tts_speech",
+      "input": {
+        "endpoint": "speech",
+        "text": "Testing standard text to speech synthesis.",
+        "language": "English"
+      },
+      "timeout": 60000
+    },
+    {
+      "name": "personaplex_health",
+      "input": {
+        "endpoint": "personaplex-health"
+      },
+      "timeout": 60000
+    }
+  ],
+  "config": {
+    "gpuTypeId": "NVIDIA GeForce RTX 4090",
+    "gpuCount": 1,
+    "env": [
+      {
+        "key": "TTS_MODEL_NAME",
+        "value": "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
+      },
+      {
+        "key": "TTS_ENABLE_COMPILE",
+        "value": "false"
+      }
+    ],
+    "allowedCudaVersions": [
+      "12.7",
+      "12.6",
+      "12.5",
+      "12.4",
+      "12.3",
+      "12.2",
+      "12.1"
+    ]
+  }
+}

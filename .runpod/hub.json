@@ -1,0 +1,58 @@
+{
+  "title": "PersonaPlex + Qwen3-TTS Voice Server",
+  "description": "Dual GPU voice AI server: PersonaPlex (Moshi) for real-time voice conversations via WebSocket, and Qwen3-TTS for multilingual voice cloning with ~208ms first-chunk latency. Supports 10 languages with In-Context Learning.",
+  "type": "serverless",
+  "category": "audio",
+  "config": {
+    "runsOn": "GPU",
+    "containerDiskInGb": 40,
+    "volumeDiskInGb": 20,
+    "presets": [
+      {
+        "name": "Default",
+        "defaults": {
+          "TTS_MODEL_NAME": "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
+          "TTS_ENABLE_COMPILE": "false",
+          "TTS_DECODE_WINDOW": "80"
+        }
+      },
+      {
+        "name": "Optimized (torch.compile)",
+        "defaults": {
+          "TTS_MODEL_NAME": "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
+          "TTS_ENABLE_COMPILE": "true",
+          "TTS_DECODE_WINDOW": "80"
+        }
+      }
+    ],
+    "env": [
+      {
+        "key": "TTS_MODEL_NAME",
+        "input": {
+          "name": "TTS Model Name",
+          "type": "string",
+          "description": "HuggingFace model ID for Qwen3-TTS",
+          "default": "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
+        }
+      },
+      {
+        "key": "TTS_ENABLE_COMPILE",
+        "input": {
+          "name": "Enable torch.compile",
+          "type": "string",
+          "description": "Enable torch.compile streaming optimizations (true/false). Increases startup time but reduces inference latency.",
+          "default": "false"
+        }
+      },
+      {
+        "key": "TTS_DECODE_WINDOW",
+        "input": {
+          "name": "Decode Window Frames",
+          "type": "string",
+          "description": "Number of frames per decode window for streaming TTS",
+          "default": "80"
+        }
+      }
+    ]
+  }
+}

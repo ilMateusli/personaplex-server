@@ -1,10 +1,12 @@
-# PersonaPlex + Qwen3-TTS Streaming Dual GPU Server for Koyeb
-# Both services share the same RTX A6000 GPU
+# PersonaPlex + Qwen3-TTS Streaming Dual GPU Server
+# Supports both Koyeb and RunPod Serverless deployments.
 # Nginx reverse proxy routes traffic on port 8998:
 #   /api/chat        → PersonaPlex (WebSocket, port 8999)
 #   /v1/*            → Qwen3-TTS Streaming (REST+streaming, port 8880)
 #   /health-tts      → Qwen3-TTS health
 #   /*               → PersonaPlex (default)
+#
+# RunPod: handler.py starts Supervisor internally and proxies requests.
 
 ARG BASE_IMAGE="nvcr.io/nvidia/cuda"
 ARG BASE_IMAGE_TAG="12.4.1-runtime-ubuntu22.04"
@@ -102,14 +104,19 @@ RUN mkdir -p /tmp/nginx_client_body /tmp/nginx_proxy /tmp/nginx_fastcgi /tmp/ngi
 # Create cache directories
 RUN mkdir -p /root/.cache /tmp/numba_cache
 
+# ─── RunPod Handler + Start Script ───────────────────────────────────────────
+RUN pip install --no-cache-dir runpod
+COPY handler.py /app/handler.py
+COPY start.sh /app/start.sh
+RUN chmod +x /app/start.sh
+
 # ─── Runtime ──────────────────────────────────────────────────────────────────
 WORKDIR /app
 EXPOSE 8998
 
-# Health check against the nginx reverse proxy
 HEALTHCHECK --interval=30s --timeout=10s --start-period=600s --retries=3 \
     CMD curl -f http://localhost:8998/health || exit 1
 
-# Run supervisord to manage all processes
+# start.sh auto-detects RunPod vs standalone and starts the right entrypoint
 ENTRYPOINT []
-CMD ["supervisord", "-c", "/app/supervisord.conf"]
+CMD ["/app/start.sh"]
