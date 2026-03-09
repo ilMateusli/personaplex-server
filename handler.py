@@ -8,6 +8,7 @@ then proxies RunPod job requests to the appropriate backend.
 Supported endpoints (via input.endpoint):
   - "voice-clone": POST /v1/audio/voice-clone on Qwen3-TTS
   - "speech":      POST /v1/audio/speech on Qwen3-TTS
+  - "voices":      GET /v1/audio/voices on Qwen3-TTS
   - "health":      Combined health check (both services)
   - "personaplex-health": PersonaPlex health only
   - "tts-health":  Qwen3-TTS health only
@@ -28,13 +29,13 @@ Example voice-clone input:
 """
 
 import base64
+import json
 import logging
 import os
 import subprocess
 import time
+from urllib.error import HTTPError, URLError
 from urllib.request import urlopen, Request
-from urllib.error import URLError
-import json
 
 import runpod
 
@@ -48,22 +49,26 @@ logger = logging.getLogger("runpod-handler")
 
 TTS_URL = "http://127.0.0.1:8880"
 PERSONAPLEX_URL = "http://127.0.0.1:8999"
-NGINX_URL = "http://127.0.0.1:8998"
+STARTUP_TIMEOUT = int(os.getenv("RUNPOD_STARTUP_TIMEOUT", "600"))
+STARTUP_POLL_INTERVAL = float(os.getenv("RUNPOD_STARTUP_POLL_INTERVAL", "5"))
 
 # ─── Startup ──────────────────────────────────────────────────────────────────
 
 supervisor_proc = None
+services_started = False
 
 
 def start_services():
     """Start Nginx + PersonaPlex + Qwen3-TTS via Supervisor."""
     global supervisor_proc
 
+    if supervisor_proc and supervisor_proc.poll() is None:
+        logger.info("Services already running under supervisord")
+        return
+
     logger.info("Starting services via supervisord...")
     supervisor_proc = subprocess.Popen(
         ["supervisord", "-c", "/app/supervisord.conf"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
     )
     logger.info(f"Supervisord started (pid={supervisor_proc.pid})")
 
@@ -77,6 +82,11 @@ def wait_for_services(timeout=600):
     personaplex_ready = False
 
     while time.time() - start < timeout:
+        if supervisor_proc and supervisor_proc.poll() is not None:
+            raise RuntimeError(
+                f"supervisord exited before startup completed (code={supervisor_proc.returncode})"
+            )
+
         if not tts_ready:
             try:
                 res = urlopen(f"{TTS_URL}/health", timeout=5)
@@ -107,10 +117,28 @@ def wait_for_services(timeout=600):
             logger.info("TTS ready, PersonaPlex still loading (continuing anyway)")
             return True
 
-        time.sleep(5)
+        time.sleep(STARTUP_POLL_INTERVAL)
 
     logger.warning(f"Services not fully ready after {timeout}s (tts={tts_ready}, personaplex={personaplex_ready})")
     return tts_ready  # At minimum TTS must be up
+
+
+def ensure_services_started():
+    """Boot the local services once before the RunPod worker starts accepting jobs."""
+    global services_started
+
+    if services_started:
+        return
+
+    start_services()
+
+    if not wait_for_services(timeout=STARTUP_TIMEOUT):
+        raise RuntimeError(
+            "Timed out waiting for Qwen3-TTS to become ready. "
+            "Check supervisord logs for the failing service."
+        )
+
+    services_started = True
 
 
 def _fetch_json(url, data=None, timeout=120):
@@ -136,7 +164,7 @@ def _fetch_json(url, data=None, timeout=120):
 def handler(job):
     """RunPod serverless handler — routes to the right backend."""
     job_input = job.get("input", {})
-    endpoint = job_input.get("endpoint", "voice-clone")
+    endpoint = job_input.get("endpoint", "health")
 
     try:
         if endpoint == "health":
@@ -193,7 +221,7 @@ def _handle_personaplex_health():
     try:
         res = urlopen(f"{PERSONAPLEX_URL}/", timeout=5)
         return {"status": "ok", "http_status": res.status}
-    except Exception as e:
+    except (HTTPError, URLError) as e:
         return {"status": "error", "error": str(e)}
 
 
@@ -255,8 +283,10 @@ def _handle_voice_clone(job_input):
     }
 
 
-# ─── Startup (module level — required by RunPod Hub detection) ────────────────
+def main():
+    ensure_services_started()
+    runpod.serverless.start({"handler": handler})
 
-start_services()
-wait_for_services()
-runpod.serverless.start({"handler": handler})
+
+if __name__ == "__main__":
+    main()

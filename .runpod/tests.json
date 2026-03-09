@@ -8,13 +8,9 @@
       "timeout": 300000
     },
     {
-      "name": "tts_voice_clone",
+      "name": "tts_voices",
       "input": {
-        "endpoint": "voice-clone",
-        "text": "Hello, this is a voice cloning test.",
-        "language": "English",
-        "ref_text": "Hello, welcome! How can I help you today?",
-        "stream": false
+        "endpoint": "voices"
       },
       "timeout": 60000
     },
