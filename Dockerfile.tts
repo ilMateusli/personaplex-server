@@ -1,12 +1,12 @@
-# Qwen3-TTS Standalone — Voice cloning only (no PersonaPlex/Moshi)
-# Lighter image: no Nginx, no Supervisor, no PersonaPlex dependencies.
+# Qwen3-TTS Standalone — faster-qwen3-tts with CUDA graphs
+# Uses andimarafioti/faster-qwen3-tts for ~5x lower TTFA via static KV cache.
 #
 # Usage:
-#   docker build -f Dockerfile.tts -t qwen3-tts .
-#   docker run --gpus all -p 8880:8880 qwen3-tts
+#   docker build -f Dockerfile.tts -t faster-qwen3-tts .
+#   docker run --gpus all -p 8880:8880 faster-qwen3-tts
 
-ARG BASE_IMAGE="nvcr.io/nvidia/cuda"
-ARG BASE_IMAGE_TAG="12.4.1-runtime-ubuntu22.04"
+ARG BASE_IMAGE="nvidia/cuda"
+ARG BASE_IMAGE_TAG="12.4.1-devel-ubuntu22.04"
 FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG}
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -18,7 +18,7 @@ ENV NVIDIA_VISIBLE_DEVICES=all
 ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
 ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64:/usr/local/nvidia/lib:/usr/local/nvidia/lib64:${LD_LIBRARY_PATH}
 
-# System dependencies (TTS-only subset — no libopus, no nginx, no supervisor)
+# System dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     pkg-config \
@@ -36,43 +36,32 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && ln -sf /usr/bin/python3.11 /usr/bin/python3 \
     && ln -sf /usr/bin/python3 /usr/bin/python
 
-# ─── Qwen3-TTS Setup ─────────────────────────────────────────────────────────
-WORKDIR /app/qwen3-tts
-
-COPY qwen3-tts/pyproject.toml ./
+# ─── faster-qwen3-tts Setup ─────────────────────────────────────────────────
+WORKDIR /app/tts
 
 RUN python3 -m venv .venv
 
-# PyTorch with CUDA
+# PyTorch with CUDA 12.1
 RUN .venv/bin/pip install --no-cache-dir --upgrade pip setuptools wheel \
     && .venv/bin/pip install --no-cache-dir \
-    torch>=2.0.0 \
-    torchaudio>=2.0.0 \
+    "torch>=2.5.1" \
+    "torchaudio>=2.5.1" \
     --index-url https://download.pytorch.org/whl/cu121
 
-# TTS dependencies
+# faster-qwen3-tts (pulls qwen-tts, transformers, etc.)
 RUN .venv/bin/pip install --no-cache-dir \
-    "transformers>=4.57.3,<5.0.0" \
-    "accelerate>=1.12.0" \
-    librosa \
-    soundfile \
-    numpy \
-    scipy \
-    einops \
-    onnxruntime-gpu \
-    aiohttp \
-    sox
+    "faster-qwen3-tts>=0.2.4" \
+    "aiohttp>=3.9.0" \
+    "librosa" \
+    "scipy"
 
-# Verify transformers 4.x
-RUN .venv/bin/python3 -c "import transformers; v=transformers.__version__; print(f'transformers={v}'); assert v.startswith('4.'), f'Expected 4.x, got {v}'"
+# flash-attn for faster inference (requires devel image for nvcc)
+ENV TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9;9.0"
+RUN .venv/bin/pip install --no-cache-dir flash-attn --no-build-isolation || \
+    echo "WARNING: flash-attn build failed, falling back to SDPA"
 
-# Optional: flash-attn for faster inference
-RUN .venv/bin/pip install --no-cache-dir flash-attn --no-build-isolation || true
-
-# Copy source and install package
-COPY qwen3-tts/qwen_tts/ ./qwen_tts/
+# Copy server
 COPY qwen3-tts/tts_streaming_server.py ./
-RUN .venv/bin/pip install --no-cache-dir -e .
 
 # Cache dirs
 RUN mkdir -p /root/.cache /tmp/numba_cache
@@ -83,9 +72,8 @@ EXPOSE 8880
 ENV HOST=0.0.0.0
 ENV PORT=8880
 ENV TTS_MODEL_NAME=Qwen/Qwen3-TTS-12Hz-1.7B-Base
-ENV TTS_ENABLE_COMPILE=false
-ENV TTS_DECODE_WINDOW=80
-ENV PYTHONPATH=/app/qwen3-tts
+ENV TTS_CHUNK_SIZE=8
+ENV PYTHONPATH=/app/tts
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=300s --retries=3 \
     CMD curl -f http://localhost:8880/health || exit 1

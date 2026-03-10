@@ -1,4 +1,4 @@
-# Qwen3-TTS Standalone — Voice cloning only
+# faster-qwen3-tts Standalone — Voice cloning with CUDA graphs
 #
 # Usage:
 #   docker compose -f docker-compose.tts.yml up --build
@@ -23,8 +23,8 @@ services:
               capabilities: [gpu]
     environment:
       - TTS_MODEL_NAME=${TTS_MODEL_NAME:-Qwen/Qwen3-TTS-12Hz-1.7B-Base}
-      - TTS_ENABLE_COMPILE=${TTS_ENABLE_COMPILE:-false}
-      - TTS_DECODE_WINDOW=${TTS_DECODE_WINDOW:-80}
+      - TTS_CHUNK_SIZE=${TTS_CHUNK_SIZE:-8}
+      - TTS_PARITY_MODE=${TTS_PARITY_MODE:-true}
     volumes:
       - huggingface_cache:/root/.cache/huggingface
     restart: unless-stopped
