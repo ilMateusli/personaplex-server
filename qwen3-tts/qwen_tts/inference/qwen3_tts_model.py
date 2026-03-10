@@ -568,6 +568,7 @@ class Qwen3TTSModel:
         x_vector_only_mode: Union[bool, List[bool]] = False,
         voice_clone_prompt: Optional[Union[Dict[str, Any], List[VoiceClonePromptItem]]] = None,
         non_streaming_mode: bool = False,
+        instruct: Optional[Union[str, List[str]]] = None,
         **kwargs,
     ) -> Tuple[List[np.ndarray], int]:
         """
@@ -692,12 +693,26 @@ class Qwen3TTSModel:
 
         gen_kwargs = self._merge_generate_kwargs(**kwargs)
 
+        # Build instruct_ids if provided
+        clone_instruct_ids = None
+        if instruct is not None:
+            instructs = self._ensure_list(instruct)
+            if len(instructs) == 1 and len(texts) > 1:
+                instructs = instructs * len(texts)
+            clone_instruct_ids = []
+            for ins in instructs:
+                if ins is None or ins == "":
+                    clone_instruct_ids.append(None)
+                else:
+                    clone_instruct_ids.append(self._tokenize_texts([self._build_instruct_text(ins)])[0])
+
         talker_codes_list, _ = self.model.generate(
             input_ids=input_ids,
             ref_ids=ref_ids,
             voice_clone_prompt=voice_clone_prompt_dict,
             languages=languages,
             non_streaming_mode=non_streaming_mode,
+            instruct_ids=clone_instruct_ids,
             **gen_kwargs,
         )
 
@@ -749,6 +764,8 @@ class Qwen3TTSModel:
         repetition_penalty_window: int = 100,
         # Repetition penalty (disabled by default for streaming to avoid vocabulary starvation)
         repetition_penalty: float = 1.0,
+        # Instruction for controlling voice style/diction
+        instruct: Optional[str] = None,
         **kwargs,
     ) -> Generator[Tuple[np.ndarray, int], None, None]:
         """
@@ -832,6 +849,11 @@ class Qwen3TTSModel:
                     ref_tok = self._tokenize_texts([self._build_ref_text(rt)])[0]
                     ref_ids.append(ref_tok)
 
+        # Build instruct_ids if provided
+        clone_instruct_ids = None
+        if instruct is not None and instruct.strip() != "":
+            clone_instruct_ids = [self._tokenize_texts([self._build_instruct_text(instruct)])[0]]
+
         # Extract streaming params, filter to only supported ones
         gen_kwargs = self._merge_generate_kwargs(**kwargs)
         # Only keep params supported by stream_generate_pcm
@@ -850,6 +872,7 @@ class Qwen3TTSModel:
             voice_clone_prompt=voice_clone_prompt_dict,
             languages=languages,
             non_streaming_mode=non_streaming_mode,
+            instruct_ids=clone_instruct_ids,
             emit_every_frames=emit_every_frames,
             decode_window_frames=decode_window_frames,
             overlap_samples=overlap_samples,
