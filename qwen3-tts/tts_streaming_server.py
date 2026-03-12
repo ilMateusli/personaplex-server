@@ -30,6 +30,7 @@ import numpy as np
 import soundfile as sf
 import torch
 from aiohttp import web
+from aiohttp.client_exceptions import ClientConnectionResetError
 from faster_qwen3_tts import FasterQwen3TTS
 
 logging.basicConfig(
@@ -276,6 +277,22 @@ def _pcm_to_wav_header(sample_rate: int, num_channels: int = 1, bits_per_sample:
 def _float32_to_int16(audio: np.ndarray) -> bytes:
     clipped = np.clip(audio, -1.0, 1.0)
     return (clipped * 32767).astype(np.int16).tobytes()
+
+
+async def _safe_stream_write(resp: web.StreamResponse, payload: bytes, label: str) -> bool:
+    try:
+        await resp.write(payload)
+        return True
+    except (ClientConnectionResetError, ConnectionResetError, BrokenPipeError, RuntimeError) as err:
+        logger.info(f"[{label}] Client disconnected during streaming write: {err}")
+        return False
+
+
+async def _safe_stream_write_eof(resp: web.StreamResponse, label: str) -> None:
+    try:
+        await resp.write_eof()
+    except (ClientConnectionResetError, ConnectionResetError, BrokenPipeError, RuntimeError) as err:
+        logger.info(f"[{label}] Stream closed before EOF: {err}")
 
 
 async def _async_generate_chunks(stream_kwargs: dict):
@@ -697,6 +714,10 @@ async def handle_voices(request: web.Request) -> web.Response:
     return web.json_response({"voices": voices})
 
 
+async def handle_favicon(_request: web.Request) -> web.Response:
+    return web.Response(status=204)
+
+
 async def handle_speech(request: web.Request) -> web.StreamResponse:
     """
     POST /v1/audio/speech
@@ -746,23 +767,30 @@ async def handle_speech(request: web.Request) -> web.StreamResponse:
     resp = web.StreamResponse()
     resp.content_type = "audio/pcm" if response_format == "pcm" else "audio/wav"
     resp.headers["Transfer-Encoding"] = "chunked"
-    resp.headers["Cache-Control"] = "no-cache"
+    resp.headers["Cache-Control"] = "no-cache, no-transform"
+    resp.headers["X-Accel-Buffering"] = "no"
     await resp.prepare(request)
 
     try:
         first_chunk = True
         async for chunk, sr, _timing in _async_generate_chunks(dict(
             text=text, language=language, ref_audio=silence_key,
-            ref_text="", xvec_only=True, chunk_size=CHUNK_SIZE, parity_mode=PARITY_MODE,
+            ref_text="", xvec_only=True, chunk_size=CHUNK_SIZE,
+            non_streaming_mode=False,
+            parity_mode=PARITY_MODE,
         )):
             if first_chunk and response_format != "pcm":
-                await resp.write(_pcm_to_wav_header(sr))
+                if not await _safe_stream_write(resp, _pcm_to_wav_header(sr), "speech"):
+                    return resp
                 first_chunk = False
-            await resp.write(_float32_to_int16(chunk))
+            if not await _safe_stream_write(resp, _float32_to_int16(chunk), "speech"):
+                return resp
+    except (ClientConnectionResetError, ConnectionResetError, BrokenPipeError, RuntimeError) as e:
+        logger.info(f"[speech] Client disconnected: {e}")
     except Exception as e:
         logger.error(f"[speech] Error: {e}\n{traceback.format_exc()}")
 
-    await resp.write_eof()
+    await _safe_stream_write_eof(resp, "speech")
     return resp
 
 
@@ -825,13 +853,6 @@ async def handle_voice_clone(request: web.Request) -> web.StreamResponse:
     using_cached_prompt = prompt_items is not None
     xvec_only = ref_text is None or ref_text.strip() == ""
 
-    logger.info(
-        f"[voice-clone] text={text[:50]}... lang={language} "
-        f"voice_id={voice_id or '-'} cached={using_cached_prompt} "
-        f"xvec_only={xvec_only} instruct={'yes' if instruct else 'no'} "
-        f"stream={stream} format={response_format}"
-    )
-
     # Prepare ref_audio for FasterQwen3TTS
     tmp_ref_path: Optional[str] = None
     effective_ref_audio: str = ""
@@ -851,6 +872,13 @@ async def handle_voice_clone(request: web.Request) -> web.StreamResponse:
             effective_ref_audio = ref_audio
         effective_ref_text = ref_text or ""
 
+    logger.info(
+        f"[voice-clone] text={text[:50]}... lang={language} "
+        f"voice_id={voice_id or '-'} cached={using_cached_prompt} "
+        f"xvec_only={xvec_only} instruct={'yes' if instruct else 'no'} "
+        f"stream={stream} format={response_format}"
+    )
+
     stream_kwargs = dict(
         text=text,
         language=language,
@@ -858,9 +886,11 @@ async def handle_voice_clone(request: web.Request) -> web.StreamResponse:
         ref_text=effective_ref_text,
         xvec_only=xvec_only,
         chunk_size=CHUNK_SIZE,
+        non_streaming_mode=not bool(stream),
         parity_mode=PARITY_MODE,
     )
 
+    resp: Optional[web.StreamResponse] = None
     try:
         if not stream:
             all_chunks = []
@@ -881,23 +911,29 @@ async def handle_voice_clone(request: web.Request) -> web.StreamResponse:
         resp = web.StreamResponse()
         resp.content_type = "audio/pcm" if response_format == "pcm" else "audio/wav"
         resp.headers["Transfer-Encoding"] = "chunked"
-        resp.headers["Cache-Control"] = "no-cache"
+        resp.headers["Cache-Control"] = "no-cache, no-transform"
+        resp.headers["X-Accel-Buffering"] = "no"
         await resp.prepare(request)
 
         first_chunk = True
         async for chunk, sr, _timing in _async_generate_chunks(stream_kwargs):
             if first_chunk and response_format != "pcm":
-                await resp.write(_pcm_to_wav_header(sr))
+                if not await _safe_stream_write(resp, _pcm_to_wav_header(sr), "voice-clone"):
+                    return resp
                 first_chunk = False
-            await resp.write(_float32_to_int16(chunk))
+            if not await _safe_stream_write(resp, _float32_to_int16(chunk), "voice-clone"):
+                return resp
 
-        await resp.write_eof()
+        await _safe_stream_write_eof(resp, "voice-clone")
         return resp
 
+    except (ClientConnectionResetError, ConnectionResetError, BrokenPipeError, RuntimeError) as e:
+        logger.info(f"[voice-clone] Client disconnected: {e}")
+        return resp or web.Response(status=499)
     except Exception as e:
         logger.error(f"[voice-clone] Error: {e}\n{traceback.format_exc()}")
-        if stream:
-            await resp.write_eof()
+        if stream and resp is not None:
+            await _safe_stream_write_eof(resp, "voice-clone")
             return resp
         return web.json_response({"error": str(e)}, status=500)
     finally:
@@ -1049,6 +1085,8 @@ def create_app() -> web.Application:
     app = web.Application(client_max_size=50 * 1024 * 1024)
     app["voice_prompts"] = {}
     app.router.add_get("/health", handle_health)
+    app.router.add_get("/health-tts", handle_health)
+    app.router.add_get("/favicon.ico", handle_favicon)
     app.router.add_get("/v1/audio/voices", handle_voices)
     app.router.add_post("/v1/audio/speech", handle_speech)
     app.router.add_post("/v1/audio/voice-clone/enroll", handle_voice_clone_enroll)
