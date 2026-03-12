@@ -20,6 +20,7 @@ import io
 import json
 import logging
 import os
+import secrets
 import struct
 import tempfile
 import time
@@ -52,6 +53,9 @@ PORT = int(os.environ.get("PORT", "8880"))
 CHUNK_SIZE = int(os.environ.get("TTS_CHUNK_SIZE", "2"))
 MAX_REF_AUDIO_SECONDS = int(os.environ.get("TTS_MAX_REF_AUDIO_SECONDS", "15"))
 PARITY_MODE = os.environ.get("TTS_PARITY_MODE", "false").lower() == "true"
+DEMO_AUTH_ENABLED = os.environ.get("TTS_DEMO_AUTH_ENABLED", "true").lower() != "false"
+DEMO_USERNAME = os.environ.get("TTS_DEMO_USERNAME", "octalab-octalk")
+DEMO_PASSWORD = os.environ.get("TTS_DEMO_PASSWORD", "Vn7kQ4mP2xL9bS6")
 
 SUPPORTED_LANGUAGES = [
     "Auto", "Chinese", "English", "Japanese", "Korean",
@@ -718,6 +722,31 @@ async def handle_favicon(_request: web.Request) -> web.Response:
     return web.Response(status=204)
 
 
+def _unauthorized_demo_response() -> web.Response:
+    return web.Response(
+        status=401,
+        text="Authentication required",
+        headers={"WWW-Authenticate": 'Basic realm="OctaLab Qwen3 Demo"'},
+    )
+
+
+def _is_demo_authorized(request: web.Request) -> bool:
+    if not DEMO_AUTH_ENABLED:
+        return True
+
+    header = request.headers.get("Authorization", "")
+    if not header.startswith("Basic "):
+        return False
+
+    try:
+        decoded = base64.b64decode(header[6:]).decode("utf-8")
+        username, password = decoded.split(":", 1)
+    except Exception:
+        return False
+
+    return secrets.compare_digest(username, DEMO_USERNAME) and secrets.compare_digest(password, DEMO_PASSWORD)
+
+
 async def handle_speech(request: web.Request) -> web.StreamResponse:
     """
     POST /v1/audio/speech
@@ -1020,6 +1049,8 @@ async def handle_voice_clone_enroll(request: web.Request) -> web.Response:
 
 async def handle_demo(request: web.Request) -> web.Response:
     """GET /demo — Interactive streaming TTS demo page."""
+    if not _is_demo_authorized(request):
+        return _unauthorized_demo_response()
     voice_ids = list(_get_voice_prompt_store(request.app).keys())
     return web.Response(text=_build_demo_html(voice_ids), content_type="text/html")
 
