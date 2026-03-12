@@ -8,8 +8,8 @@
 #
 # RunPod: handler.py starts Supervisor internally and proxies requests.
 
-ARG BASE_IMAGE="nvcr.io/nvidia/cuda"
-ARG BASE_IMAGE_TAG="12.4.1-runtime-ubuntu22.04"
+ARG BASE_IMAGE="nvidia/cuda"
+ARG BASE_IMAGE_TAG="12.4.1-devel-ubuntu22.04"
 FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG}
 
 # Prevent interactive prompts
@@ -52,47 +52,33 @@ COPY moshi/ /app/moshi/
 RUN uv venv /app/moshi/.venv --python 3.12
 RUN uv sync
 
-# ─── Qwen3-TTS Streaming Setup ──────────────────────────────────────────────
-WORKDIR /app/qwen3-tts/
+# ─── faster-qwen3-tts Setup ──────────────────────────────────────────────────
+WORKDIR /app/tts/
 
-# Copy pyproject.toml first for dependency caching
-COPY qwen3-tts/pyproject.toml /app/qwen3-tts/
+# Create TTS virtual environment
+RUN python3 -m venv /app/tts/.venv
 
-# Create Qwen3-TTS virtual environment
-RUN python3 -m venv /app/qwen3-tts/.venv
-
-# Install PyTorch with CUDA support
-RUN /app/qwen3-tts/.venv/bin/pip install --no-cache-dir --upgrade pip setuptools wheel \
-    && /app/qwen3-tts/.venv/bin/pip install --no-cache-dir \
-    torch>=2.0.0 \
-    torchaudio>=2.0.0 \
+# Install PyTorch with CUDA 12.1
+RUN /app/tts/.venv/bin/pip install --no-cache-dir --upgrade pip setuptools wheel \
+    && /app/tts/.venv/bin/pip install --no-cache-dir \
+    "torch>=2.5.1" \
+    "torchaudio>=2.5.1" \
     --index-url https://download.pytorch.org/whl/cu121
 
-# Install Qwen3-TTS streaming dependencies (cache-bust: 2026-03-05)
-RUN /app/qwen3-tts/.venv/bin/pip install --no-cache-dir \
-    "transformers>=4.57.3,<5.0.0" \
-    "accelerate>=1.12.0" \
-    librosa \
-    soundfile \
-    numpy \
-    scipy \
-    einops \
-    onnxruntime-gpu \
-    aiohttp \
-    sox
+# Install faster-qwen3-tts (pulls qwen-tts, transformers, etc.)
+RUN /app/tts/.venv/bin/pip install --no-cache-dir \
+    "faster-qwen3-tts>=0.2.4" \
+    "aiohttp>=3.9.0" \
+    "librosa" \
+    "scipy"
 
-# Verify transformers version is 4.x (not 5.x which removed check_model_inputs)
-RUN /app/qwen3-tts/.venv/bin/python3 -c "import transformers; v=transformers.__version__; print(f'transformers={v}'); assert v.startswith('4.'), f'Expected 4.x, got {v}'"
+# Install flash-attn for faster inference (requires devel image for nvcc)
+ENV TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9;9.0"
+RUN /app/tts/.venv/bin/pip install --no-cache-dir flash-attn --no-build-isolation || \
+    echo "WARNING: flash-attn build failed, falling back to SDPA"
 
-# Try to install flash-attn (optional, may fail on some architectures)
-RUN /app/qwen3-tts/.venv/bin/pip install --no-cache-dir flash-attn --no-build-isolation || true
-
-# Copy Qwen3-TTS streaming library and server
-COPY qwen3-tts/qwen_tts/ /app/qwen3-tts/qwen_tts/
-COPY qwen3-tts/tts_streaming_server.py /app/qwen3-tts/tts_streaming_server.py
-
-# Install the qwen_tts package in editable mode
-RUN /app/qwen3-tts/.venv/bin/pip install --no-cache-dir -e .
+# Copy TTS server
+COPY qwen3-tts/tts_streaming_server.py /app/tts/tts_streaming_server.py
 
 # ─── Nginx + Supervisor Config ────────────────────────────────────────────────
 COPY nginx.conf /app/nginx.conf
