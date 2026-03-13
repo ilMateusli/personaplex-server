@@ -585,7 +585,26 @@ async function startStreaming() {{
       throw new Error(err.error || `HTTP ${{res.status}}`);
     }}
 
-    const ctx = new AudioContext({{ sampleRate: SAMPLE_RATE }});
+    if (!res.body) {{
+      throw new Error('No audio stream returned by the server');
+    }}
+
+    const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextCtor) {{
+      throw new Error('Web Audio API not available in this browser');
+    }}
+
+    let ctx;
+    try {{
+      ctx = new AudioContextCtor({{ sampleRate: SAMPLE_RATE }});
+    }} catch (_audioErr) {{
+      ctx = new AudioContextCtor();
+    }}
+
+    if (ctx.state === 'suspended') {{
+      await ctx.resume();
+    }}
+
     let nextTime = ctx.currentTime;
     const reader = res.body.getReader();
     let leftover = new Uint8Array(0);
@@ -625,6 +644,10 @@ async function startStreaming() {{
 
       $('metricChunks').textContent = chunkCount;
       $('metricTotal').textContent = Math.round(performance.now() - t0) + 'ms';
+    }}
+
+    if (!firstChunkTime) {{
+      throw new Error('Stream finished without playable audio chunks');
     }}
 
     setStatus('idle', `Done — ${{chunkCount}} chunks`);
