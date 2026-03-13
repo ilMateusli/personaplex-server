@@ -51,11 +51,68 @@ TTS_URL = "http://127.0.0.1:8880"
 PERSONAPLEX_URL = "http://127.0.0.1:8999"
 STARTUP_TIMEOUT = int(os.getenv("RUNPOD_STARTUP_TIMEOUT", "600"))
 STARTUP_POLL_INTERVAL = float(os.getenv("RUNPOD_STARTUP_POLL_INTERVAL", "5"))
+READINESS_LOG_INTERVAL = float(os.getenv("SERVICE_READINESS_LOG_INTERVAL", "10"))
+RUNPOD_ENV_KEYS = (
+    "RUNPOD_POD_ID",
+    "RUNPOD_ENDPOINT_ID",
+    "RUNPOD_WEBHOOK_GET_JOB",
+    "RUNPOD_WEBHOOK_POST_OUTPUT",
+    "RUNPOD_WORKER_ID",
+    "RUNPOD_REQUEST_ID",
+)
 
 # ─── Startup ──────────────────────────────────────────────────────────────────
 
 supervisor_proc = None
 services_started = False
+
+
+def is_runpod_environment():
+    explicit = os.getenv("RUNPOD_MODE", "").strip().lower()
+    if explicit in {"1", "true", "yes"}:
+        return True
+    return any(os.getenv(key) for key in RUNPOD_ENV_KEYS)
+
+
+def _truncate(value, limit=240):
+    if value is None:
+        return ""
+    text = str(value).replace("\n", " ").replace("\r", " ").strip()
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}..."
+
+
+def _probe_tts():
+    try:
+        res = urlopen(Request(f"{TTS_URL}/health"), timeout=5)
+        raw = res.read().decode("utf-8", errors="replace")
+        payload = json.loads(raw) if raw else {}
+        payload_status = payload.get("status", "unknown")
+        details = f"http={res.status}, status={payload_status}"
+        if payload_status != "ok":
+            details = f"{details}, payload={_truncate(raw)}"
+        return payload_status == "ok", details
+    except HTTPError as err:
+        body = err.read().decode("utf-8", errors="replace") if hasattr(err, "read") else ""
+        return False, f"http_error={err.code}, body={_truncate(body or err.reason)}"
+    except URLError as err:
+        return False, f"url_error={_truncate(err.reason)}"
+    except Exception as err:
+        return False, f"{type(err).__name__}: {_truncate(err)}"
+
+
+def _probe_personaplex():
+    try:
+        res = urlopen(Request(f"{PERSONAPLEX_URL}/"), timeout=5)
+        return res.status == 200, f"http={res.status}"
+    except HTTPError as err:
+        body = err.read().decode("utf-8", errors="replace") if hasattr(err, "read") else ""
+        return False, f"http_error={err.code}, body={_truncate(body or err.reason)}"
+    except URLError as err:
+        return False, f"url_error={_truncate(err.reason)}"
+    except Exception as err:
+        return False, f"{type(err).__name__}: {_truncate(err)}"
 
 
 def start_services():
@@ -80,6 +137,10 @@ def wait_for_services(timeout=600):
 
     tts_ready = False
     personaplex_ready = False
+    last_tts_details = None
+    last_personaplex_details = None
+    last_log_at = 0.0
+    last_probe_snapshot = None
 
     while time.time() - start < timeout:
         if supervisor_proc and supervisor_proc.poll() is not None:
@@ -88,25 +149,34 @@ def wait_for_services(timeout=600):
             )
 
         if not tts_ready:
-            try:
-                res = urlopen(f"{TTS_URL}/health", timeout=5)
-                data = json.loads(res.read())
-                if data.get("status") == "ok":
-                    tts_ready = True
-                    elapsed = time.time() - start
-                    logger.info(f"Qwen3-TTS ready after {elapsed:.0f}s")
-            except Exception:
-                pass
+            tts_ready, tts_details = _probe_tts()
+            last_tts_details = tts_details
+            if tts_ready:
+                elapsed = time.time() - start
+                logger.info(f"Qwen3-TTS ready after {elapsed:.0f}s ({tts_details})")
 
         if not personaplex_ready:
-            try:
-                res = urlopen(f"{PERSONAPLEX_URL}/", timeout=5)
-                if res.status == 200:
-                    personaplex_ready = True
-                    elapsed = time.time() - start
-                    logger.info(f"PersonaPlex ready after {elapsed:.0f}s")
-            except Exception:
-                pass
+            personaplex_ready, personaplex_details = _probe_personaplex()
+            last_personaplex_details = personaplex_details
+            if personaplex_ready:
+                elapsed = time.time() - start
+                logger.info(f"PersonaPlex ready after {elapsed:.0f}s ({personaplex_details})")
+
+        now = time.time()
+        probe_snapshot = (
+            "ready" if tts_ready else (last_tts_details or "pending"),
+            "ready" if personaplex_ready else (last_personaplex_details or "pending"),
+        )
+        if now - last_log_at >= READINESS_LOG_INTERVAL or probe_snapshot != last_probe_snapshot:
+            elapsed = now - start
+            logger.info(
+                "Startup probe after %.0fs | tts=%s | personaplex=%s",
+                elapsed,
+                probe_snapshot[0],
+                probe_snapshot[1],
+            )
+            last_log_at = now
+            last_probe_snapshot = probe_snapshot
 
         if tts_ready and personaplex_ready:
             logger.info("All services ready")
@@ -114,12 +184,22 @@ def wait_for_services(timeout=600):
 
         if tts_ready:
             # TTS is the critical one; PersonaPlex can take longer
-            logger.info("TTS ready, PersonaPlex still loading (continuing anyway)")
+            logger.info(
+                "TTS ready, PersonaPlex still loading (continuing anyway, personaplex=%s)",
+                last_personaplex_details or "pending",
+            )
             return True
 
         time.sleep(STARTUP_POLL_INTERVAL)
 
-    logger.warning(f"Services not fully ready after {timeout}s (tts={tts_ready}, personaplex={personaplex_ready})")
+    logger.warning(
+        "Services not fully ready after %ss (tts=%s, personaplex=%s, last_tts=%s, last_personaplex=%s)",
+        timeout,
+        tts_ready,
+        personaplex_ready,
+        last_tts_details or "n/a",
+        last_personaplex_details or "n/a",
+    )
     return tts_ready  # At minimum TTS must be up
 
 
@@ -285,7 +365,19 @@ def _handle_voice_clone(job_input):
 
 def main():
     ensure_services_started()
-    runpod.serverless.start({"handler": handler})
+    if is_runpod_environment():
+        logger.info("RunPod environment detected; starting serverless worker")
+        runpod.serverless.start({"handler": handler})
+        return
+
+    logger.warning(
+        "RunPod environment not detected; staying attached to supervisord for standalone/Koyeb mode. "
+        "If this is Koyeb, check the service command and prefer /app/start.sh."
+    )
+    if supervisor_proc is None:
+        raise RuntimeError("supervisord was not started")
+    exit_code = supervisor_proc.wait()
+    raise SystemExit(exit_code)
 
 
 if __name__ == "__main__":
